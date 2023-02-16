@@ -7,6 +7,9 @@ use crate::measurement::{Measurement, WallTime};
 use crate::BatchSize;
 
 #[cfg(feature = "async")]
+use futures::{stream::FuturesUnordered, StreamExt};
+
+#[cfg(feature = "async")]
 use std::future::Future;
 
 #[cfg(feature = "async")]
@@ -504,11 +507,12 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
     }
 
     #[doc(hidden)]
-    pub fn iter_with_setup<I, O, S, R, F>(&mut self, setup: S, routine: R)
+    pub fn iter_with_setup<I, O, S, R, F, G>(&mut self, setup: S, routine: R)
     where
-        S: FnMut() -> I,
+        S: FnMut() -> G,
         R: FnMut(I) -> F,
         F: Future<Output = O>,
+        G: Future<Output = I>,
     {
         self.iter_batched(setup, routine, BatchSize::PerIteration);
     }
@@ -554,15 +558,16 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
         R: FnMut() -> F,
         F: Future<Output = O>,
     {
-        self.iter_batched(|| (), |_| routine(), BatchSize::SmallInput);
+        self.iter_batched(|| async {}, |_| routine(), BatchSize::SmallInput);
     }
 
     #[doc(hidden)]
-    pub fn iter_with_large_setup<I, O, S, R, F>(&mut self, setup: S, routine: R)
+    pub fn iter_with_large_setup<I, O, S, R, F, G>(&mut self, setup: S, routine: R)
     where
-        S: FnMut() -> I,
+        S: FnMut() -> G,
         R: FnMut(I) -> F,
         F: Future<Output = O>,
+        G: Future<Output = I>,
     {
         self.iter_batched(setup, routine, BatchSize::NumBatches(1));
     }
@@ -612,11 +617,12 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
     /// ```
     ///
     #[inline(never)]
-    pub fn iter_batched<I, O, S, R, F>(&mut self, mut setup: S, mut routine: R, size: BatchSize)
+    pub fn iter_batched<I, O, S, R, F, G>(&mut self, mut setup: S, mut routine: R, size: BatchSize)
     where
-        S: FnMut() -> I,
+        S: FnMut() -> G,
         R: FnMut(I) -> F,
         F: Future<Output = O>,
+        G: Future<Output = I>,
     {
         let AsyncBencher { b, runner } = self;
         runner.block_on(async {
@@ -628,7 +634,7 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
 
             if batch_size == 1 {
                 for _ in 0..b.iters {
-                    let input = black_box(setup());
+                    let input = black_box(setup().await);
 
                     let start = b.measurement.start();
                     let output = routine(input).await;
@@ -643,7 +649,13 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
                 while iteration_counter < b.iters {
                     let batch_size = ::std::cmp::min(batch_size, b.iters - iteration_counter);
 
-                    let inputs = black_box((0..batch_size).map(|_| setup()).collect::<Vec<_>>());
+                    let inputs = black_box(
+                        (0..batch_size)
+                            .map(|_| setup())
+                            .collect::<FuturesUnordered<_>>()
+                            .collect::<Vec<_>>()
+                            .await,
+                    );
                     let mut outputs = Vec::with_capacity(batch_size as usize);
 
                     let start = b.measurement.start();
@@ -710,11 +722,16 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
     /// ```
     ///
     #[inline(never)]
-    pub fn iter_batched_ref<I, O, S, R, F>(&mut self, mut setup: S, mut routine: R, size: BatchSize)
-    where
-        S: FnMut() -> I,
+    pub fn iter_batched_ref<I, O, S, R, F, G>(
+        &mut self,
+        mut setup: S,
+        mut routine: R,
+        size: BatchSize,
+    ) where
+        S: FnMut() -> G,
         R: FnMut(&mut I) -> F,
         F: Future<Output = O>,
+        G: Future<Output = I>,
     {
         let AsyncBencher { b, runner } = self;
         runner.block_on(async {
@@ -726,7 +743,7 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
 
             if batch_size == 1 {
                 for _ in 0..b.iters {
-                    let mut input = black_box(setup());
+                    let mut input = black_box(setup().await);
 
                     let start = b.measurement.start();
                     let output = routine(&mut input).await;
@@ -742,7 +759,13 @@ impl<'a, 'b, A: AsyncExecutor, M: Measurement> AsyncBencher<'a, 'b, A, M> {
                 while iteration_counter < b.iters {
                     let batch_size = ::std::cmp::min(batch_size, b.iters - iteration_counter);
 
-                    let inputs = black_box((0..batch_size).map(|_| setup()).collect::<Vec<_>>());
+                    let inputs = black_box(
+                        (0..batch_size)
+                            .map(|_| setup())
+                            .collect::<FuturesUnordered<_>>()
+                            .collect::<Vec<_>>()
+                            .await,
+                    );
                     let mut outputs = Vec::with_capacity(batch_size as usize);
 
                     let start = b.measurement.start();
